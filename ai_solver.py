@@ -12,7 +12,7 @@ api_key = os.getenv("OPENROUTER_API_KEY")
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Card detection
 # ---------------------------------------------------------------------------
 
 def find_white_card(img_np):
@@ -28,11 +28,14 @@ def find_white_card(img_np):
     return None
 
 
-def find_elements_in_card(card_np, min_area=1000):
+# ---------------------------------------------------------------------------
+# Element detection — two strategies
+# ---------------------------------------------------------------------------
+
+def detect_colored_elements(card_np, min_area=500):
     """
-    Find all non-white clickable elements inside a card.
-    Returns list of (cx, cy, x, y, w, h) sorted top→bottom, left→right.
-    Color-agnostic — works for any button color or shape.
+    Strategy A: Find non-white filled elements (colored buttons).
+    Works for: Quizalize, Kahoot, Quizizz, etc.
     """
     gray = cv2.cvtColor(card_np, cv2.COLOR_RGB2GRAY)
     _, white_mask = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)
@@ -43,15 +46,14 @@ def find_elements_in_card(card_np, min_area=1000):
     opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel)
 
     contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
     card_h, card_w = card_np.shape[:2]
+
     elements = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < min_area:
             continue
         x, y, w, h = cv2.boundingRect(cnt)
-        # Skip elements that span the full card width (likely decorative lines)
         if w > card_w * 0.85:
             continue
         elements.append((x + w // 2, y + h // 2, x, y, w, h))
@@ -60,15 +62,70 @@ def find_elements_in_card(card_np, min_area=1000):
     return elements
 
 
-def filter_answer_buttons(elements, card_w):
+def detect_bordered_elements(card_np, min_area=2000):
     """
-    From all elements, keep only likely answer buttons:
-    wider than tall, reasonable size, not too wide.
+    Strategy B: Find bordered/outlined boxes via edge detection.
+    Works for: Quipper, Google Forms, and other sites with white outlined boxes.
     """
+    gray = cv2.cvtColor(card_np, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, 30, 100)
+
+    kernel = np.ones((3, 3), np.uint8)
+    dilated = cv2.dilate(edges, kernel, iterations=2)
+
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    card_h, card_w = card_np.shape[:2]
+
+    elements = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_area:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w > card_w * 0.85:
+            continue
+        if w < 80 or h < 25:
+            continue
+        elements.append((x + w // 2, y + h // 2, x, y, w, h))
+
+    elements.sort(key=lambda e: (round(e[1] / 60) * 60, e[0]))
+    return elements
+
+
+def find_elements_in_card(card_np, min_area=500):
+    """
+    Try colored detection first; fall back to edge/border detection.
+    Filters result to likely answer buttons (wider than tall, not too wide).
+    """
+    card_h, card_w = card_np.shape[:2]
+
+    # Try Strategy A first
+    elements = detect_colored_elements(card_np, min_area)
+    buttons = _filter_buttons(elements, card_w)
+
+    if len(buttons) >= 2:
+        print("  🎨 Using colored element detection")
+        return buttons, "colored"
+
+    # Fall back to Strategy B
+    elements = detect_bordered_elements(card_np, min_area=2000)
+    buttons = _filter_buttons(elements, card_w)
+
+    if len(buttons) >= 2:
+        print("  📐 Using edge/border detection")
+        return buttons, "bordered"
+
+    # Last resort: return whatever we found
+    print("  ⚠️ Falling back to all detected elements")
+    return elements, "fallback"
+
+
+def _filter_buttons(elements, card_w):
+    """Keep only elements that look like answer buttons."""
     buttons = []
     for e in elements:
         cx, cy, x, y, w, h = e
-        if w > card_w * 0.6:
+        if w > card_w * 0.7:
             continue
         if h > w:
             continue
@@ -78,8 +135,11 @@ def filter_answer_buttons(elements, card_w):
     return buttons
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def crop_element(card_np, element, padding=8, upscale=2):
-    """Crop an element from the card with padding, optionally upscale."""
     cx, cy, x, y, w, h = element
     x1 = max(0, x - padding)
     y1 = max(0, y - padding)
@@ -97,7 +157,6 @@ def encode_image(path):
 
 
 def call_ai(content):
-    """Call OpenRouter API and parse JSON response."""
     response = requests.post(
         url="https://openrouter.ai/api/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -124,7 +183,8 @@ def call_ai(content):
 
 def solve_quiz(image_path):
     """
-    Find card → detect answer buttons → send crops to AI → return screen coords.
+    Find card → detect answer buttons (colored or bordered) →
+    send crops to AI → return screen coords to click.
     """
     img = Image.open(image_path)
     img_np = np.array(img)
@@ -148,10 +208,9 @@ def solve_quiz(image_path):
 
     card_np = img_np[card_y:card_y+card_h, card_x:card_x+card_w]
 
-    # Find answer buttons
-    all_elements = find_elements_in_card(card_np)
-    buttons = filter_answer_buttons(all_elements, card_w)
-    print(f"🔲 Found {len(buttons)} answer buttons")
+    # Find buttons using best available strategy
+    buttons, strategy = find_elements_in_card(card_np)
+    print(f"🔲 Found {len(buttons)} buttons ({strategy})")
     for i, btn in enumerate(buttons):
         print(f"   {i+1}: center=({btn[0]},{btn[1]}) size={btn[4]}x{btn[5]}")
 
@@ -187,7 +246,8 @@ Respond ONLY with JSON, no explanation, no markdown:
     "correct_button": <1 to N>,
     "correct_answer": "<exact text of correct answer>"
 }
-state is "result" only if showing right/wrong feedback after answering."""})
+state is "result" only if showing right/wrong feedback after answering.
+correct_button is the number of the correct answer button shown above."""})
 
     ai_result = call_ai(content)
     if not ai_result:
@@ -215,6 +275,7 @@ state is "result" only if showing right/wrong feedback after answering."""})
             "card_x": card_x, "card_y": card_y,
             "card_w": card_w, "card_h": card_h,
             "scale_x": scale_x, "scale_y": scale_y,
+            "strategy": strategy,
         }
     }
 
@@ -225,9 +286,8 @@ state is "result" only if showing right/wrong feedback after answering."""})
 
 def find_next_button(image_path, meta):
     """
-    Find the Next/Continue button on the result screen.
-    Detects all elements in the card, sends crops to AI,
-    asks which one is the Next button. No hardcoded colors.
+    Find the Next/Continue/Answer button on the result or submission screen.
+    Uses same dual detection strategy — works on any quiz site.
     """
     img = Image.open(image_path)
     img_np = np.array(img)
@@ -244,39 +304,51 @@ def find_next_button(image_path, meta):
 
     card_np = img_np[card_y:card_y+card_h, card_x:card_x+card_w]
 
-    # Find ALL non-white elements (includes circles, buttons, arrows)
-    # Use smaller min_area to catch small circle buttons like Quizalize's Next
-    all_elements = find_elements_in_card(card_np, min_area=500)
-    print(f"🔍 Found {len(all_elements)} elements on result screen")
+    # Get ALL elements (both strategies, smaller min_area to catch small buttons)
+    colored = detect_colored_elements(card_np, min_area=500)
+    bordered = detect_bordered_elements(card_np, min_area=1000)
+
+    # Merge and deduplicate by proximity
+    all_elements = colored.copy()
+    for be in bordered:
+        is_dup = any(abs(be[0]-e[0]) < 30 and abs(be[1]-e[1]) < 30 for e in all_elements)
+        if not is_dup:
+            all_elements.append(be)
+
+    all_elements.sort(key=lambda e: (round(e[1] / 60) * 60, e[0]))
+    print(f"🔍 Found {len(all_elements)} elements for Next button search")
 
     if not all_elements:
-        print("❌ No elements found on result screen")
+        print("❌ No elements found")
         return None, None
 
-    # Save crops of all elements
+    # Save crops
     base = image_path.replace(".png", "")
-    card_path = base + "_result_card.png"
+    card_path = base + "_next_card.png"
     Image.fromarray(card_np).save(card_path)
 
     element_paths = []
     for i, el in enumerate(all_elements):
         crop = crop_element(card_np, el, upscale=2)
-        path = base + f"_el{i+1}.png"
+        path = base + f"_nel{i+1}.png"
         Image.fromarray(crop).save(path)
         element_paths.append(path)
         print(f"   {i+1}: center=({el[0]},{el[1]}) size={el[4]}x{el[5]}")
 
-    # Ask AI which element is the Next/Continue button
+    # Ask AI which is the submit/next button
     content = []
-    content.append({"type": "text", "text": "This is a quiz result screen:"})
+    content.append({"type": "text", "text": "This is a quiz screen:"})
     content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encode_image(card_path)}"}})
-    content.append({"type": "text", "text": f"\nHere are all {len(element_paths)} clickable elements on screen, numbered:"})
+    content.append({"type": "text", "text": f"\nHere are all {len(element_paths)} clickable elements, numbered:"})
     for i, path in enumerate(element_paths):
         content.append({"type": "text", "text": f"Element {i+1}:"})
         content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encode_image(path)}"}})
     content.append({"type": "text", "text": """
-Which element is the Next or Continue button (the one to proceed to the next question)?
-It might be labeled 'Next', 'Continue', have an arrow icon (→), or similar.
+Which element is the button to proceed forward? This could be:
+- A "Next" or "Next Question" button
+- A "Continue" button  
+- An arrow/→ button
+- An "Answer" or "Submit" button (if the answer hasn't been submitted yet)
 
 Respond ONLY with JSON, no explanation, no markdown:
 {
@@ -291,13 +363,13 @@ Respond ONLY with JSON, no explanation, no markdown:
 
     el_num = ai_result.get("element_number", 0)
     if not el_num or el_num < 1 or el_num > len(all_elements):
-        print("❌ AI returned invalid element number")
+        print("❌ Invalid element number from AI")
         return None, None
 
     el = all_elements[el_num - 1]
     screen_x = int((card_x + el[0]) * scale_x)
     screen_y = int((card_y + el[1]) * scale_y)
-    print(f"✅ Next button is element {el_num} → screen ({screen_x},{screen_y})")
+    print(f"✅ Next/Submit button is element {el_num} → screen ({screen_x},{screen_y})")
     return screen_x, screen_y
 
 
