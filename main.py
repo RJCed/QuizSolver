@@ -1,92 +1,90 @@
 import keyboard
 import time
-import re
+import sys
 from screenshot import take_screenshot
-from ai_solver import solve_quiz
-from clicker import auto_click_answer, find_and_click_next
+from ai_solver import solve_quiz, find_next_button
+from clicker import click_coordinates
 
-def extract_correct_answer(ai_response):
-    """Pull just the correct answer text from AI response"""
-    lines = ai_response.split('\n')
-    for line in lines:
-        line_lower = line.lower()
-        if 'correct answer' in line_lower or '4.' in line:
-            # Clean up the line to get just the answer text
-            answer = re.sub(r'[\*\#\d\.\:]', '', line)
-            answer = answer.replace('Correct Answer', '').replace('Text of Correct Answer', '')
-            answer = answer.strip()
-            if answer:
-                return answer
-    return None
 
 def run_bot():
     print("🤖 Quiz Bot is running!")
-    print("Press F9 to START the bot on a quiz")
+    print("Press F9 to START")
+    print("Press F8 for EMERGENCY STOP")
     print("Press F10 to quit")
-    print("⚠️  Move mouse to top-left corner to emergency stop")
     print("-" * 40)
+
+    def emergency_stop():
+        print("\n🚨 EMERGENCY STOP triggered! (F8)")
+        sys.exit(0)
+
+    keyboard.add_hotkey('F8', emergency_stop)
 
     while True:
         if keyboard.is_pressed('F9'):
-            print("\n🚀 Bot started! Running automatically...")
+            print("\n🚀 Bot started!")
             time.sleep(0.5)
-            
-            # Keep answering questions automatically
+
             while True:
-                # Step 1: Screenshot
+                if keyboard.is_pressed('F8'):
+                    emergency_stop()
+
+                # Step 1: Screenshot + analyse question
                 print("\n📸 Taking screenshot...")
                 image_path = take_screenshot()
 
-                # Step 2: Ask AI
-                print("🤖 Asking AI for answer...")
-                ai_response = solve_quiz(image_path)
+                print("🤖 Analysing quiz...")
+                result = solve_quiz(image_path)
 
-                if ai_response is None:
-                    print("❌ AI could not find an answer, stopping")
+                if result is None:
+                    print("❌ Could not analyse quiz — stopping")
                     break
 
-                print("\n=== AI RESPONSE ===")
-                print(ai_response)
-                print("===================\n")
+                print(f"\n=== RESULT ===")
+                print(f"  State:   {result.get('state')}")
+                print(f"  Answer:  {result.get('correct_answer')}")
+                print(f"  Coords:  ({result.get('answer_x')}, {result.get('answer_y')})")
+                print("==============\n")
 
-                # Step 3: Extract correct answer
-                correct_answer = extract_correct_answer(ai_response)
+                state = result.get("state", "question")
+                meta = result.get("_meta", {})
 
-                if correct_answer:
-                    print(f"🎯 Correct answer: {correct_answer}")
-                    # Step 4: Click the answer
-                    success = auto_click_answer(correct_answer)
-                    
-                    if success:
-                        # Step 5: Wait for result then click Next
-                        print("⏳ Waiting for result...")
-                        time.sleep(2)
-                        next_found = find_and_click_next()
-                        
-                        if not next_found:
-                            print("⚠️ Next button not found - stopping bot")
-                            break
-                            
-                        # Wait for next question to load
-                        print("⏳ Loading next question...")
-                        time.sleep(2)
+                # Step 2: Click answer if on question screen
+                if state == "question":
+                    ax, ay = result.get("answer_x", 0), result.get("answer_y", 0)
+                    if ax and ay:
+                        print(f"🎯 Clicking: {result.get('correct_answer')}")
+                        click_coordinates(ax, ay)
+                        print("⏳ Waiting for result screen...")
+                        time.sleep(2.5)
                     else:
-                        print("❌ Could not click answer - stopping bot")
+                        print("❌ No valid button coords — stopping")
                         break
+
+                # Step 3: Take fresh screenshot, find Next button by element detection
+                print("📸 Taking result screenshot...")
+                result_path = take_screenshot()
+
+                nx, ny = find_next_button(result_path, meta)
+
+                if nx and ny:
+                    print(f"⏭️ Clicking Next at ({nx},{ny})")
+                    click_coordinates(nx, ny)
+                    print("⏳ Loading next question...")
+                    time.sleep(2)
                 else:
-                    print("⚠️ Could not extract answer - stopping bot")
+                    print("⚠️ No Next button found — quiz may be finished!")
                     break
-                    
-                # Check if F10 pressed during run
+
                 if keyboard.is_pressed('F10'):
                     print("\n👋 Bot stopped mid-quiz!")
                     break
 
         if keyboard.is_pressed('F10'):
-            print("\n👋 Bot stopped. Goodbye!")
+            print("\n👋 Goodbye!")
             break
 
         time.sleep(0.1)
+
 
 if __name__ == "__main__":
     run_bot()
