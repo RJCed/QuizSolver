@@ -85,3 +85,43 @@ def click_coordinates(x, y):
 if __name__ == "__main__":
     test_answer = input("Enter a word that's visible on your screen: ")
     auto_click_answer(test_answer)
+
+
+
+# hover for next question
+
+def find_and_click_next():
+    """Automatically find and click the Next button"""
+    print("⏭️ Looking for Next button...")
+    time.sleep(8)  # Wait for next button to appear
+    
+    # Take fresh screenshot
+    screenshot = pyautogui.screenshot()
+    screenshot_np = np.array(screenshot)
+    gray = cv2.cvtColor(screenshot_np, cv2.COLOR_RGB2GRAY)
+    
+    # Get all text on screen
+    data = pytesseract.image_to_data(
+        gray,
+        output_type=pytesseract.Output.DICT
+    )
+    
+    # Look for "Next" or "next" text
+    next_keywords = ['next', 'continue', 'proceed', 'forward', '→', '>']
+    
+    n_boxes = len(data['text'])
+    for i in range(n_boxes):
+        word = data['text'][i].lower().strip()
+        if word in next_keywords:
+            x = data['left'][i] + data['width'][i] // 2
+            y = data['top'][i] + data['height'][i] // 2
+            print(f"✅ Found Next button at ({x}, {y})")
+            time.sleep(0.5)
+            pyautogui.moveTo(x, y, duration=0.3)
+            pyautogui.click()
+            print("⏭️ Clicked Next!")
+            return True
+    
+    # If text not found, try looking for arrow button by color
+    print("⚠️ Next text not found, trying image search...")
+    return False
