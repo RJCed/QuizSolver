@@ -2,6 +2,7 @@ import requests
 import base64
 import os
 import json
+import io
 import cv2
 import numpy as np
 from PIL import Image
@@ -151,16 +152,31 @@ def crop_element(card_np, element, padding=8, upscale=2):
     return crop
 
 
-def encode_image(path):
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
+def encode_image(path, max_width=900, quality=70):
+    """
+    Encode image as compressed JPEG to reduce token usage.
+    - Resizes to max_width if larger (card crops are usually small already)
+    - JPEG quality 70 — readable but much smaller than PNG
+    """
+    img = Image.open(path).convert("RGB")
+    if img.width > max_width:
+        ratio = max_width / img.width
+        new_h = int(img.height * ratio)
+        img = img.resize((max_width, new_h), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
 def call_ai(content):
     response = requests.post(
         url="https://openrouter.ai/api/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={"model": "openrouter/auto", "messages": [{"role": "user", "content": content}]}
+        json={
+            "model": "openrouter/auto",
+            "max_tokens": 500,
+            "messages": [{"role": "user", "content": content}]
+        }
     )
     result = response.json()
     if "error" in result:
@@ -233,11 +249,11 @@ def solve_quiz(image_path):
     # Ask AI which button is correct
     content = []
     content.append({"type": "text", "text": "Here is the quiz card:"})
-    content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encode_image(card_path)}"}})
+    content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image(card_path)}"}})
     content.append({"type": "text", "text": f"\nHere are the {len(button_paths)} answer buttons individually:"})
     for i, path in enumerate(button_paths):
         content.append({"type": "text", "text": f"Button {i+1}:"})
-        content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encode_image(path)}"}})
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image(path)}"}})
     content.append({"type": "text", "text": """
 Which answer is correct?
 Respond ONLY with JSON, no explanation, no markdown:
@@ -338,11 +354,11 @@ def find_next_button(image_path, meta):
     # Ask AI which is the submit/next button
     content = []
     content.append({"type": "text", "text": "This is a quiz screen:"})
-    content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encode_image(card_path)}"}})
+    content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image(card_path)}"}})
     content.append({"type": "text", "text": f"\nHere are all {len(element_paths)} clickable elements, numbered:"})
     for i, path in enumerate(element_paths):
         content.append({"type": "text", "text": f"Element {i+1}:"})
-        content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encode_image(path)}"}})
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image(path)}"}})
     content.append({"type": "text", "text": """
 Which element is the button to proceed forward? This could be:
 - A "Next" or "Next Question" button
