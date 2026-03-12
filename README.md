@@ -264,6 +264,6 @@ Built with ❤️ and [Claude Sonnet 4.6](https://anthropic.com)
 ---
 
 <div align="center">
-<sub>QuizSolver is an independent open-source project and is not affiliated with Quizalize, Quipper, Groq, OpenRouter, or Anthropic.\\
+<sub>QuizSolver is an independent open-source project and is not affiliated with Quizalize, Quipper, Groq, OpenRouter, or Anthropic.<br/>
 (This project was made by AI)</sub>
 </div>
