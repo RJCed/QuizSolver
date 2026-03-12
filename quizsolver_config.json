@@ -1,17 +1,18 @@
 {
   "provider": "Groq  (Free \u2014 No Credit Card)",
   "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-  "max_tokens": 725,
+  "max_tokens": 500,
   "image_max_width": 900,
   "image_quality": 60,
   "wait_after_answer": 1.0,
   "wait_after_submit": 2.5,
-  "wait_for_next_button": 3.0,
+  "wait_for_next_button": 5.0,
   "wait_after_next": 2.0,
   "min_button_area": 500,
   "min_button_height": 15,
   "min_button_width": 50,
   "top_ignore_pct": 0.0,
   "has_submit_button": true,
-  "site_profile": "Quizalize"
+  "next_button_optional": false,
+  "site_profile": "Quipper"
 }

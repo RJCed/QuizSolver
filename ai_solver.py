@@ -1,3 +1,33 @@
+"""
+ai_solver.py — Computer vision + AI inference for QuizSolver.
+
+ARCHITECTURE FOR DEVELOPERS
+============================
+Two public entry points used by bot.py:
+
+  solve_quiz(image_path)         → detects answer buttons, asks AI which is
+                                   correct, returns click coordinates.
+
+  find_next_button(image_path, meta) → detects all clickable elements, asks AI
+                                       which one is Next/Submit, returns coords.
+
+Both functions send exactly ONE annotated image to the AI (numbered bounding
+boxes drawn directly on the card). This keeps the request under any per-image
+cap (e.g. Llama's hard limit of 5 images per request).
+
+Detection pipeline
+------------------
+  Screenshot → find_white_card()
+             → find_elements_in_card()   (colored or bordered strategy)
+             → _filter_buttons()
+             → annotate_card()           (draw numbered boxes)
+             → call_ai()                 (provider-agnostic HTTP POST)
+
+To add a new detection strategy, implement a detect_*() function and add a
+branch in find_elements_in_card(). Register it as a valid "detection" mode in
+config.py SITE_PROFILES and the FIELD REFERENCE guide there.
+"""
+
 import requests
 import base64
 import os
@@ -14,12 +44,12 @@ load_dotenv(app_path(".env"))
 
 # Active config — set by bot.py at runtime, falls back to safe defaults
 ACTIVE_CONFIG = {
-    "provider":        "Groq  (Free — No Credit Card)",
-    "model":           "meta-llama/llama-4-scout-17b-16e-instruct",
-    "max_tokens":      500,
-    "image_max_width": 900,
-    "image_quality":   70,
-    "min_button_area": 500,
+    "provider":          "Groq  (Free — No Credit Card)",
+    "model":             "meta-llama/llama-4-scout-17b-16e-instruct",
+    "max_tokens":        500,
+    "image_max_width":   900,
+    "image_quality":     70,
+    "min_button_area":   500,
     "min_button_height": 15,
     "min_button_width":  50,
     "top_ignore_pct":    0.0,
@@ -42,7 +72,7 @@ def _log(msg):
 
 def _get_provider_runtime():
     """
-    Returns (url, api_key, is_free_model) for the currently active config.
+    Returns (url, api_key, is_free_model, pcfg) for the currently active config.
     Reads the correct env var per provider so multi-provider support works.
     """
     from config import PROVIDERS, DEFAULTS
@@ -50,11 +80,11 @@ def _get_provider_runtime():
     provider_name = ACTIVE_CONFIG.get("provider", DEFAULTS["provider"])
     pcfg = PROVIDERS.get(provider_name, list(PROVIDERS.values())[0])
 
-    url       = pcfg["url"]
-    key_env   = pcfg["key_env"]
-    api_key   = os.getenv(key_env, "").strip()
-    model     = ACTIVE_CONFIG.get("model", pcfg["default_model"])
-    is_free   = model in pcfg.get("free_models", set())
+    url     = pcfg["url"]
+    key_env = pcfg["key_env"]
+    api_key = os.getenv(key_env, "").strip()
+    model   = ACTIVE_CONFIG.get("model", pcfg["default_model"])
+    is_free = model in pcfg.get("free_models", set())
 
     return url, api_key, is_free, pcfg
 
@@ -149,7 +179,7 @@ def find_elements_in_card(card_np, min_area=None):
 
     if mode in ("colored", "auto"):
         elements = detect_colored_elements(card_np, min_area)
-        buttons = _filter_buttons(elements, card_w, card_h)
+        buttons  = _filter_buttons(elements, card_w, card_h)
         if len(buttons) >= 2:
             print("  🎨 Using colored element detection")
             return buttons, "colored"
@@ -159,7 +189,7 @@ def find_elements_in_card(card_np, min_area=None):
 
     if mode in ("bordered", "auto"):
         elements = detect_bordered_elements(card_np, min_area=2000)
-        buttons = _filter_buttons(elements, card_w, card_h)
+        buttons  = _filter_buttons(elements, card_w, card_h)
         if len(buttons) >= 2:
             print("  📐 Using edge/border detection")
             return buttons, "bordered"
@@ -177,9 +207,9 @@ def _filter_buttons(elements, card_w, card_h=None):
     Pass 1: basic size/position gates.
     Pass 2: height clustering — drop outliers much shorter than the median.
     """
-    min_h = ACTIVE_CONFIG.get("min_button_height", 15)
-    min_w = ACTIVE_CONFIG.get("min_button_width", 50)
-    top_pct = ACTIVE_CONFIG.get("top_ignore_pct", 0.0)
+    min_h      = ACTIVE_CONFIG.get("min_button_height", 15)
+    min_w      = ACTIVE_CONFIG.get("min_button_width",  50)
+    top_pct    = ACTIVE_CONFIG.get("top_ignore_pct",    0.0)
     top_cutoff = (card_h * top_pct) if card_h else 0
 
     candidates = []
@@ -198,10 +228,10 @@ def _filter_buttons(elements, card_w, card_h=None):
     if len(candidates) <= 2:
         return candidates
 
-    heights = sorted([e[5] for e in candidates])
-    median_h = heights[len(heights) // 2]
+    heights          = sorted([e[5] for e in candidates])
+    median_h         = heights[len(heights) // 2]
     min_acceptable_h = median_h * 0.4
-    buttons = [e for e in candidates if e[5] >= min_acceptable_h]
+    buttons          = [e for e in candidates if e[5] >= min_acceptable_h]
     return buttons if len(buttons) >= 2 else candidates
 
 
@@ -211,41 +241,43 @@ def _filter_buttons(elements, card_w, card_h=None):
 
 def crop_element(card_np, element, padding=8, upscale=2):
     """
-    Crop a single element out of the card image with optional padding and upscaling.
-    Not used by the main bot flow (which sends an annotated card image instead),
-    but kept as a debugging/inspection utility — e.g. to visually verify detection.
+    Crop a single element out of the card image with optional padding/upscaling.
+    Not used by the main bot flow (which sends one annotated card image instead),
+    but kept as a debugging/inspection utility.
     """
     cx, cy, x, y, w, h = element
-    x1 = max(0, x - padding)
-    y1 = max(0, y - padding)
-    x2 = min(card_np.shape[1], x + w + padding)
-    y2 = min(card_np.shape[0], y + h + padding)
+    x1   = max(0, x - padding)
+    y1   = max(0, y - padding)
+    x2   = min(card_np.shape[1], x + w + padding)
+    y2   = min(card_np.shape[0], y + h + padding)
     crop = card_np[y1:y2, x1:x2]
     if upscale > 1:
-        crop = cv2.resize(crop, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
+        crop = cv2.resize(crop, None, fx=upscale, fy=upscale,
+                          interpolation=cv2.INTER_CUBIC)
     return crop
 
 
 def annotate_card(card_np, elements, color=(255, 100, 0)):
     """
-    Draw a numbered bounding box on the card for each element.
-    Returns a new annotated numpy array — original is not modified.
+    Draw a numbered bounding box on the card for each element and return the
+    annotated image as a numpy array. The original is never modified.
+
     Always produces exactly ONE image regardless of element count, so models
     with a per-request image cap (e.g. Llama's hard limit of 5) are never hit.
 
     Args:
         card_np:  H×W×C numpy array (RGB or RGBA — both handled safely).
-        elements: list of (cx, cy, x, y, w, h) tuples from find_elements_in_card.
-        color:    Border/badge colour as an RGB tuple. Default is orange (255,100,0).
+        elements: list of (cx, cy, x, y, w, h) tuples.
+        color:    Border/badge colour as an RGB tuple. Default is orange.
 
     Returns:
         H×W×3 numpy array in RGB.
     """
-    # Guard: convert to 3-channel RGB regardless of source format (RGB or RGBA).
-    rgb = np.array(Image.fromarray(card_np).convert("RGB"))
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    b, g, r    = color[2], color[1], color[0]   # unpack RGB → BGR components
-    h_img, w_img = bgr.shape[:2]
+    # Guard: normalise to 3-channel RGB regardless of source (RGB or RGBA).
+    rgb            = np.array(Image.fromarray(card_np).convert("RGB"))
+    bgr            = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    b, g, r        = color[2], color[1], color[0]   # RGB → BGR components
+    h_img, w_img   = bgr.shape[:2]
 
     for i, el in enumerate(elements):
         cx, cy, x, y, w, h = el
@@ -261,7 +293,7 @@ def annotate_card(card_np, elements, color=(255, 100, 0)):
         (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
         pad = 4
 
-        # Clamp badge to stay within image bounds so it never clips off-screen
+        # Clamp badge so it never overflows the image edge
         bx1 = max(0, x)
         by1 = max(0, y)
         bx2 = min(bx1 + tw + pad * 2,            w_img - 1)
@@ -269,9 +301,8 @@ def annotate_card(card_np, elements, color=(255, 100, 0)):
 
         cv2.rectangle(bgr, (bx1, by1), (bx2, by2), (b, g, r), cv2.FILLED)
 
-        # putText origin is the bottom-left of the text.
-        # Using by1 + th + pad keeps the text anchored from the badge top,
-        # which is stable even when the badge is at y=0 or near the bottom edge.
+        # putText origin is bottom-left of the glyph baseline.
+        # by1 + th + pad anchors from the badge top — stable at any position.
         text_x = bx1 + pad
         text_y = min(by1 + th + pad, h_img - 1)
         cv2.putText(bgr, label, (text_x, text_y),
@@ -287,7 +318,7 @@ def encode_image(path):
     but kept as a utility for external callers or debugging.
     """
     max_width = ACTIVE_CONFIG.get("image_max_width", 900)
-    quality   = ACTIVE_CONFIG.get("image_quality", 70)
+    quality   = ACTIVE_CONFIG.get("image_quality",   70)
     img = Image.open(path).convert("RGB")
     if img.width > max_width:
         ratio = max_width / img.width
@@ -298,9 +329,9 @@ def encode_image(path):
 
 
 def encode_numpy(img_np):
-    """Encode a numpy RGB array as compressed JPEG — no temp file needed."""
+    """Encode a numpy RGB array as a compressed JPEG base64 string — no temp file needed."""
     max_width = ACTIVE_CONFIG.get("image_max_width", 900)
-    quality   = ACTIVE_CONFIG.get("image_quality", 70)
+    quality   = ACTIVE_CONFIG.get("image_quality",   70)
     img = Image.fromarray(img_np).convert("RGB")
     if img.width > max_width:
         ratio = max_width / img.width
@@ -316,20 +347,19 @@ def encode_numpy(img_np):
 
 def call_ai(content):
     url, api_key, is_free_model, pcfg = _get_provider_runtime()
-    model      = ACTIVE_CONFIG.get("model", pcfg["default_model"])
-    max_tokens = ACTIVE_CONFIG.get("max_tokens", 500)
+    model       = ACTIVE_CONFIG.get("model", pcfg["default_model"])
+    max_tokens  = ACTIVE_CONFIG.get("max_tokens", 500)
     provider_id = pcfg["id"]   # "groq" or "openrouter"
 
     if not api_key:
-        _log("❌ API_ERROR:NO_KEY — No API key entered")
-        _log(f"💡 FIX: Paste your {pcfg.get('id', 'provider').title()} API key and click Save Key")
+        _log("❌ API_ERROR:NO_KEY — No API key saved")
+        _log(f"💡 FIX: Paste your {pcfg.get('id', 'provider').title()} key in Step 2 and click Save Key")
         return None
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type":  "application/json",
     }
-    # OpenRouter wants these extra headers
     if provider_id == "openrouter":
         headers["HTTP-Referer"] = "https://quizsolver.app"
         headers["X-Title"]      = "QuizSolver"
@@ -347,8 +377,8 @@ def call_ai(content):
         )
         result = response.json()
     except requests.exceptions.Timeout:
-        _log("❌ API_ERROR:TIMEOUT — Request timed out after 30s")
-        _log("💡 FIX: Check your internet connection, or try again")
+        _log("❌ API_ERROR:TIMEOUT — Request timed out after 30 s")
+        _log("💡 FIX: Check your internet connection, then try again")
         return None
     except requests.exceptions.ConnectionError:
         _log(f"❌ API_ERROR:NO_INTERNET — Could not reach {pcfg.get('id', 'provider').title()}")
@@ -356,9 +386,10 @@ def call_ai(content):
         return None
     except Exception as e:
         _log(f"❌ API_ERROR:UNKNOWN — {e}")
+        _log("💡 FIX: Restart the bot; if the problem persists switch to a different model in Step 3")
         return None
 
-    # ---- Error handling ----
+    # ── Error handling ────────────────────────────────────────────────────────
     if "error" in result:
         msg  = result["error"].get("message", "Unknown error")
         code = result["error"].get("code", 0)
@@ -367,12 +398,12 @@ def call_ai(content):
             if is_free_model:
                 _log("❌ API_ERROR:DAILY_LIMIT — Free model daily limit reached")
                 if provider_id == "openrouter":
-                    _log("💡 FIX: Wait until 8:00 AM PH time (midnight UTC) for reset")
+                    _log("💡 FIX: Wait until 8:00 AM PH time (midnight UTC) for the daily reset")
                 else:
                     _log("💡 FIX: Wait a few minutes — Groq rate limits reset frequently")
             else:
-                _log("❌ API_ERROR:NO_CREDITS — Not enough credits for this model")
-                _log("💡 FIX: Top up your account, or switch to a free model")
+                _log("❌ API_ERROR:NO_CREDITS — Not enough account credits for this model")
+                _log("💡 FIX: Top up your account, or switch to a free model in Step 3")
 
         elif "rate limit" in msg.lower() or code == 429:
             _log("❌ API_ERROR:RATE_LIMIT — Too many requests, slow down")
@@ -380,28 +411,29 @@ def call_ai(content):
 
         elif "no endpoints" in msg.lower():
             _log(f"❌ API_ERROR:NO_ENDPOINTS — Model \"{model}\" is unavailable right now")
-            _log("💡 FIX: Switch to a different model in the AI settings")
+            _log("💡 FIX: Choose a different model in Step 3 — AI Model")
 
         elif "invalid" in msg.lower() and "model" in msg.lower():
-            _log(f"❌ API_ERROR:BAD_MODEL — Model \"{model}\" not found")
-            _log("💡 FIX: Choose a different model from the dropdown")
+            _log(f"❌ API_ERROR:BAD_MODEL — Model \"{model}\" was not found")
+            _log("💡 FIX: Choose a valid model from the dropdown in Step 3 — AI Model")
 
         elif "daily" in msg.lower() or "quota" in msg.lower():
-            _log("❌ API_ERROR:DAILY_LIMIT — Daily limit reached")
-            _log("💡 FIX: Wait until tomorrow, or switch to a different provider")
+            _log("❌ API_ERROR:DAILY_LIMIT — Daily usage quota reached")
+            _log("💡 FIX: Wait until tomorrow, or switch provider in Step 1")
 
         elif "auth" in msg.lower() or code in (401, 403):
             _log("❌ API_ERROR:BAD_KEY — API key was rejected")
-            _log("💡 FIX: Re-enter your API key and click Save Key")
+            _log("💡 FIX: Re-enter your API key in Step 2 and click Save Key")
 
         else:
             _log(f"❌ API_ERROR:UNKNOWN — {msg}")
+            _log("💡 FIX: Try a different model in Step 3, or restart the bot")
 
         return None
 
     if not result.get("choices"):
         _log("❌ API_ERROR:EMPTY_RESPONSE — API returned no answer")
-        _log("💡 FIX: Increase Max Tokens slider, or switch to a different model")
+        _log("💡 FIX: Increase the 'AI Response Length' slider in Advanced Settings, or choose a different model in Step 3")
         return None
 
     raw = result["choices"][0]["message"]["content"]
@@ -410,7 +442,7 @@ def call_ai(content):
 
     if not raw or not raw.strip():
         _log("❌ API_ERROR:EMPTY_RESPONSE — AI returned an empty response")
-        _log("💡 FIX: Increase the Max Tokens slider in Advanced Settings")
+        _log("💡 FIX: Increase the 'AI Response Length' slider in Advanced Settings")
         return None
 
     try:
@@ -418,7 +450,7 @@ def call_ai(content):
         return json.loads(clean)
     except json.JSONDecodeError:
         _log("❌ AI_ERROR:BAD_JSON — AI response was cut off or malformed")
-        _log("💡 FIX: Increase the Max Tokens slider — response is being cut off")
+        _log("💡 FIX: Increase the 'AI Response Length' slider in Advanced Settings")
         return None
 
 
@@ -428,7 +460,9 @@ def call_ai(content):
 
 def solve_quiz(image_path):
     """
-    Find card → detect answer buttons → send to AI → return coords to click.
+    Find card → detect answer buttons → annotate + send to AI → return click coords.
+    Always sends exactly ONE image to the AI (the annotated card), so models
+    with a per-request image cap (e.g. Llama's hard limit of 5) are never hit.
     """
     img    = Image.open(image_path)
     img_np = np.array(img)
@@ -449,7 +483,7 @@ def solve_quiz(image_path):
         print("⚠️ No white card — using full screenshot")
         card_x, card_y, card_w, card_h = 0, 0, img_w, img_h
 
-    card_np = img_np[card_y:card_y+card_h, card_x:card_x+card_w]
+    card_np = img_np[card_y:card_y + card_h, card_x:card_x + card_w]
 
     buttons, strategy = find_elements_in_card(card_np)
     print(f"🔲 Found {len(buttons)} buttons ({strategy})")
@@ -457,22 +491,23 @@ def solve_quiz(image_path):
         print(f"   {i+1}: center=({btn[0]},{btn[1]}) size={btn[4]}x{btn[5]}")
 
     if not buttons:
-        _log("❌ No answer buttons found on screen — make sure your quiz is visible")
+        _log("❌ No answer buttons detected — make sure the quiz is fully visible")
+        _log("💡 FIX: Ensure the quiz question is fully on screen with no other windows on top")
         return None
 
-    # Draw numbered labels on ONE card image — always a single image sent to AI,
-    # so models with a per-request image cap (Llama: 5) are never hit.
+    # Single annotated card image — numbered labels drawn on the card itself.
+    # The AI sees the question + all labelled answers in one image.
     annotated_np = annotate_card(card_np, buttons)
 
-    content = []
-    content.append({"type": "text", "text": (
-        f"This is a quiz card with {len(buttons)} answer buttons. "
-        f"Each button is outlined and labelled with a number (1–{len(buttons)})."
-    )})
-    content.append({"type": "image_url", "image_url": {
-        "url": f"data:image/jpeg;base64,{encode_numpy(annotated_np)}"
-    }})
-    content.append({"type": "text", "text": f"""
+    content = [
+        {"type": "text", "text": (
+            f"This is a quiz card with {len(buttons)} answer buttons. "
+            f"Each button is outlined and labelled with a number (1–{len(buttons)})."
+        )},
+        {"type": "image_url", "image_url": {
+            "url": f"data:image/jpeg;base64,{encode_numpy(annotated_np)}"
+        }},
+        {"type": "text", "text": f"""
 Look at the quiz card. The answer buttons are numbered 1–{len(buttons)} with orange labels.
 
 IMPORTANT — set "state" correctly:
@@ -487,7 +522,8 @@ Respond ONLY with JSON, no markdown, no explanation:
     "state": "question",
     "correct_button": <1 to {len(buttons)}>,
     "correct_answer": "<exact text of correct answer>"
-}}"""})
+}}"""},
+    ]
 
     ai_result = call_ai(content)
     if not ai_result:
@@ -516,8 +552,8 @@ Respond ONLY with JSON, no markdown, no explanation:
         "answer_y":       answer_y,
         "_meta": {
             "image_path": image_path,
-            "card_x": card_x, "card_y": card_y,
-            "card_w": card_w, "card_h": card_h,
+            "card_x":  card_x,  "card_y":  card_y,
+            "card_w":  card_w,  "card_h":  card_h,
             "scale_x": scale_x, "scale_y": scale_y,
             "strategy": strategy,
         },
@@ -525,11 +561,15 @@ Respond ONLY with JSON, no markdown, no explanation:
 
 
 # ---------------------------------------------------------------------------
-# Next button finder
+# Next / Submit button finder
 # ---------------------------------------------------------------------------
 
 def find_next_button(image_path, meta):
-    """Find the Next/Continue/Submit button after an answer is submitted."""
+    """
+    Find the Next / Continue / Submit button after an answer is submitted.
+    Returns (screen_x, screen_y) or (None, None) if not found.
+    Uses a single annotated card image — same approach as solve_quiz.
+    """
     img    = Image.open(image_path)
     img_np = np.array(img)
     img_h, img_w = img_np.shape[:2]
@@ -543,14 +583,15 @@ def find_next_button(image_path, meta):
     else:
         card_x, card_y, card_w, card_h = 0, 0, img_w, img_h
 
-    card_np = img_np[card_y:card_y+card_h, card_x:card_x+card_w]
+    card_np = img_np[card_y:card_y + card_h, card_x:card_x + card_w]
 
     colored  = detect_colored_elements(card_np, min_area=500)
     bordered = detect_bordered_elements(card_np, min_area=1000)
 
     all_elements = colored.copy()
     for be in bordered:
-        is_dup = any(abs(be[0]-e[0]) < 30 and abs(be[1]-e[1]) < 30 for e in all_elements)
+        is_dup = any(abs(be[0] - e[0]) < 30 and abs(be[1] - e[1]) < 30
+                     for e in all_elements)
         if not is_dup:
             all_elements.append(be)
 
@@ -558,21 +599,22 @@ def find_next_button(image_path, meta):
     print(f"🔍 Found {len(all_elements)} elements for Next button search")
 
     if not all_elements:
-        _log("❌ No clickable elements found — quiz may have changed layout")
+        _log("❌ No clickable elements found — the quiz layout may have changed")
+        _log("💡 FIX: Increase the 'Next Question Wait' slider in Advanced Settings")
         return None, None
 
-    # Single annotated image — same approach as solve_quiz, no per-element crops.
+    # Single annotated image — no per-element crops
     annotated_np = annotate_card(card_np, all_elements)
 
-    content = []
-    content.append({"type": "text", "text": (
-        f"This is a quiz screen. All {len(all_elements)} clickable elements "
-        f"are outlined and labelled with numbers 1–{len(all_elements)}."
-    )})
-    content.append({"type": "image_url", "image_url": {
-        "url": f"data:image/jpeg;base64,{encode_numpy(annotated_np)}"
-    }})
-    content.append({"type": "text", "text": f"""
+    content = [
+        {"type": "text", "text": (
+            f"This is a quiz screen. All {len(all_elements)} clickable elements "
+            f"are outlined and labelled with numbers 1–{len(all_elements)}."
+        )},
+        {"type": "image_url", "image_url": {
+            "url": f"data:image/jpeg;base64,{encode_numpy(annotated_np)}"
+        }},
+        {"type": "text", "text": f"""
 Which numbered element is the button to proceed forward? Look for:
 - "Next" / "Next Question" button
 - "Continue" button
@@ -583,16 +625,18 @@ Respond ONLY with JSON, no explanation, no markdown:
 {{
     "found": true or false,
     "element_number": <1 to {len(all_elements)}>
-}}"""})
+}}"""},
+    ]
 
     ai_result = call_ai(content)
     if not ai_result or not ai_result.get("found"):
-        _log("❌ Could not find the Next button — try increasing the Next Question Wait slider")
+        _log("❌ Could not find the Next button — quiz may have ended or page changed")
+        _log("💡 FIX: Increase the 'Next Question Wait' slider in Advanced Settings")
         return None, None
 
     el_num = ai_result.get("element_number", 0)
     if not el_num or el_num < 1 or el_num > len(all_elements):
-        _log("❌ AI returned an invalid element number — retrying next question")
+        _log("❌ AI returned an invalid element number — skipping to next question")
         return None, None
 
     el       = all_elements[el_num - 1]
