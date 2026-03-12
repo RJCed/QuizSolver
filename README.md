@@ -260,10 +260,10 @@ See the [LICENSE](LICENSE) file for the full text.
 
 **RJCed (Arjay Cedigo)**
 Built with ❤️ and [Claude Sonnet 4.6](https://anthropic.com)
-it serves its purpose lol
 
 ---
 
 <div align="center">
-<sub>QuizSolver is an independent open-source project and is not affiliated with Quizalize, Quipper, Groq, OpenRouter, or Anthropic.</sub>
+<sub>QuizSolver is an independent open-source project and is not affiliated with Quizalize, Quipper, Groq, OpenRouter, or Anthropic.\\
+(This project was made by AI)</sub>
 </div>
